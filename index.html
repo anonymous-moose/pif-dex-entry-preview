@@ -259,7 +259,8 @@
                 // this should catch he, him, his, she, her, hers all in one. a true marvel of regex...
                 const gendered_pronouns_regex = /(^|\b)((hi(s|m)\b)|(s?her?s?\b))/gmi;
 
-                // TODO: Add a regex to check for weird characters like the quotes and newlines?
+                // regex to check for weird characters like apostrophes, the fancy quotation marks, and newlines
+                const weird_chars_regex = /\n|“|”|’/g;
 
                 var error_matches = []
 
@@ -306,6 +307,10 @@
                     addDexError("Fusions should not be referred to using gendered pronouns (\"his\", \"her\"). Only use \"its\" or \"their\".");
                 }
 
+                error_matches = error_matches.concat(entry_text.match(weird_chars_regex))
+                if (entry_text.match(weird_chars_regex)) {
+                    addDexError("Entry contains characters that don't display properly ingame.");
+                }
                 
                 // console.log(error_matches);
                 return error_matches;
