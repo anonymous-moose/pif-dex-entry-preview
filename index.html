@@ -4,6 +4,7 @@
     <head>
         <title>PIF Dex Preview Tool</title>
         <link rel="icon" type="image/png" href="Images/favicon.png">
+        <!-- none of this is AI. it's all me (a human) (and also a bit of code cribbed from humans on stackoverflow) -->
 
         <script src="name_splits.js"></script>
         <style>
@@ -29,6 +30,12 @@
             #background_image {
                 visibility: hidden;
             }
+            #dex_image {
+                visibility: hidden;
+            }
+            canvas {
+                border:1px solid #000000;
+            }
         </style>
     </head>
     <body>
@@ -40,40 +47,40 @@
 
         <form onsubmit="event.preventDefault(); updateFusionName();">
             <!-- Dex Num: <input type="number" id="headNum" name="headNum"><input type="number" id="bodyNum" name="BodyNum"> -->
-            Dex Num: <input type="text" id="dexNum" name="dexNum">
+            Dex Num: <input type="text" id="dexNum" name="dexNum" pattern="\d{1,3}\.\d{1,3}[a-z]*" title="A fusion dex number in head/body order, e.g. (123.456)" placeholder="123.456">
             <button onclick="updateFusionName()">Get Name</button>
             <br><br>
         </form>
         
         <form oninput="updatePreview()" onsubmit="event.preventDefault()">
             Fusion Name: <input type="text" id="fusionName" name="fusionName">
-            <br><br>
         </form>
         
-        
+        <!-- list of errors automatically detected by the tool -->
+        <ul id="errorsList"></ul>
 
         <p id="charcount">Character count: </p>
+        <p id="fusiondex_link_p" style="visibility: hidden;">FusionDex.org page for this fusion: <a href="https://fusiondex.org/sprite/pif/506.506a/" id="fusiondex_link">PLACEHOLDER</a></p>
 
-        <canvas id="page_1_canvas" width="512" height="384" style="border:1px solid #000000;"></canvas>
-        <canvas id="page_2_canvas" width="512" height="384" style="border:1px solid #000000;"></canvas>
-        <canvas id="page_3_canvas" width="512" height="384" style="border:1px solid #000000;"></canvas>
+        <canvas id="page_1_canvas" width="512" height="384"></canvas>
+        <canvas id="page_2_canvas" width="512" height="384"></canvas>
+        <canvas id="page_3_canvas" width="512" height="384"></canvas>
 
         <img id="background_image" src="Images/bg_info.png">
+        <div id="dex_image_holder">
+            <img id="dex_image" src="Images/decamark.png">
+        </div>
+        
 
         <div id="Test">
             abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
         </div>
 
         <br><br>
-        <br><br>
-        <br><br>
-        <br><br>
-        <br><br>
-        <br><br>
-        <br><br>
-        <br><br>
 
-        <p id="baseball" style="background-color: black; color: white;">⚾️</p> <button onclick="baseball_minigame()">click to hit baseball</button>
+
+        <!-- no more baseball minigame. you lost my only baseball. -->
+        <!-- <p id="baseball" style="background-color: black; color: white;">⚾️</p> <button onclick="baseball_minigame()">click to hit baseball</button>
         <script>
             var baseballstate = 0;
 
@@ -87,7 +94,12 @@
                 }
                 
             }
-        </script>
+        </script> -->
+
+        <footer>
+            <p>This website is not affiliated with The Pokémon Company, Nintendo, Game Freak Inc., or Creatures Inc.</p>
+            <p>It was created by anonymous_moose, and is also unaffiliated with Pokémon Infinite Fusion.</p>
+        </footer>
 
         <script>
             var pages = ["", "", ""];
@@ -97,16 +109,31 @@
             function updatePreview() {
                 var user_text = document.getElementById("textInput").value;
                 var original_text = user_text
-
                 var fusion_name = document.getElementById("fusionName").value;
+
+                clearDexErrors(); //clear all the errors from the unordered list before adding them back in
+
                 if (fusion_name != "") {
                     user_text = user_text.replaceAll("POKENAME", fusion_name)
                 }
-                console.log(user_text);
+                else {
+                    //no fusion name was entered
+                    addDexError("No name was entered. Add the dex number of the fusion in order to automatically get its name and sprite.");
+                }
+                // console.log(user_text);
                 
                 var max_chars_per_page = 150
                 splitTextIntoPages(user_text, max_chars_per_page)
 
+                
+
+                if (user_text.length < 100) {
+                    addDexError("Entry is too short (<100 characters), and would be rejected");
+                }
+
+                if (user_text.length > 250) {
+                    addDexError("Entry is too long (>250 characters), and would be rejected");
+                }
 
                 update_canvas() // (it's actually three canvases but shhhh)
 
@@ -114,16 +141,14 @@
             }
 
             function updateFusionName() {
-                const reDot = /[.]/;
                 var dexNum = document.getElementById("dexNum").value.toString();
 
-                var headNum = dexNum.slice(0, dexNum.search(reDot));
-                var bodyNum = dexNum.slice(dexNum.search(reDot)+1, dexNum.length);
-                console.log(headNum);
-                console.log(bodyNum);
-                // var headNum = document.getElementById("headNum").value;
-                // var bodyNum = document.getElementById("bodyNum").value;
+                var headNum = dexNum.match(/^\d{1,3}/); // extracts first numbers from the start of the string
+                var bodyNum = dexNum.match(/\d*(?=[a-z]*$)/); //extracts the last numbers from the end of the string, exluding any variant letters that may or may not be there
+                
+                addDexImage(dexNum); //start the external image loading
 
+                // the regex in the form *shouldn't* let you submit this but it doesn't hurt having another failsafe yknow
                 if (headNum == "" || bodyNum == "") {
                     return;
                 }
@@ -140,15 +165,18 @@
                 var headSplit = SPLIT_NAMES[headNum][0];
                 var bodySplit = SPLIT_NAMES[bodyNum][1];
                 if (bodySplit.charAt(0) == headSplit.charAt(headSplit.length-1)) {
-                
                     headSplit = headSplit.slice(0, headSplit.length-1);
                 }
 
                 fusion_name = headSplit + bodySplit;
                 document.getElementById("fusionName").value = fusion_name;
-                updatePreview()
 
-                
+                // set up the fusiondex link and show it
+                document.getElementById("fusiondex_link_p").style = "visibility: visible;";
+                document.getElementById("fusiondex_link").innerHTML = fusion_name;
+                document.getElementById("fusiondex_link").href = "https://fusiondex.org/sprite/pif/" + dexNum + "/";
+
+                updatePreview();
             }
 
             // should be a pretty darn close match to ingame, now.
@@ -174,6 +202,150 @@
 
             }
 
+            //clear out all the dex errors before re-scanning the text
+            function clearDexErrors() {
+                const list = document.getElementById("errorsList");
+
+                while (list.hasChildNodes()) {
+                    list.removeChild(list.firstChild);
+                } 
+            }
+
+            function addDexError(error_text) {
+                const node = document.createElement("li");
+
+                // Create a text node:
+                const textnode = document.createTextNode("Problem: " + error_text);
+
+                node.appendChild(textnode);
+                document.getElementById("errorsList").appendChild(node);
+            }
+
+            function addDexImage(dexNum) {
+                
+                document.getElementById("dex_image").remove(); // get rid of the old one
+                const imagenode = document.createElement("img");
+                imagenode.id = "dex_image";
+                imagenode.src = "https://infinitefusion.net/customsprites/CustomBattlers/" + dexNum + ".png";
+                imagenode.addEventListener('load', function() {
+                    console.log('Image loaded from infinitefusion.net, redrawing...');
+                    updatePreview();
+                });
+                imagenode.addEventListener('error', function() {
+                    console.error('Image failed to load! What went wrong?');
+                    imagenode.src = "Images/decamark.png" //fallback image
+
+
+                    updatePreview();
+                    addDexError("Image couldn't be loaded. Double-check you entered the dex number correctly?")
+                });
+                
+                document.getElementById("dex_image_holder").appendChild(imagenode);
+            }
+
+            // does a spell check 
+            // (should be used on individual lines, that way it's easier to find out where on the canvas to highlight)
+            function doSpellCheck(entry_text) {
+                // checks for "Pokémon" being incorrect
+                const pokemon_no_accent_regex = /pokemon/gmi;
+                const pokemon_not_capitalized_regex = /pokémon/gm;
+                const pokemon_allcaps_regex = /POKÉMON/gm; // for some reason é isn't considered to be a lowercase É?
+
+                // checks for "POKENAME" being incorrect
+                const pokename_plural_regex = /POKENAMES/gmi; // this one's grammatically incorrect and probably most likely
+                const pokename_lower_case_regex = /pokename/gm; // I think ive seen this before
+                const pokename_with_accent_regex = /POKÉNAME/gm; // never seen this one happen but i guess someone could do it?
+
+                // this should catch he, him, his, she, her, hers all in one. a true marvel of regex...
+                const gendered_pronouns_regex = /(^|\b)((hi(s|m)\b)|(s?her?s?\b))/gmi;
+
+                // TODO: Add a regex to check for weird characters like the quotes and newlines?
+
+                var error_matches = []
+
+
+                error_matches = error_matches.concat(entry_text.match(pokemon_no_accent_regex))
+                if (entry_text.match(pokemon_no_accent_regex)) {
+                    // console.log("Pokemon with no accent found");
+                    addDexError("\"Pokémon\" should always be written with an accent (é).");
+                }
+
+                error_matches = error_matches.concat(entry_text.match(pokemon_not_capitalized_regex))
+                if (entry_text.match(pokemon_not_capitalized_regex)) {
+                    // console.log("Pokemon not capitalized found");
+                    addDexError("\"Pokémon\" should always be written with a capital \"P\".");
+                }
+
+                error_matches = error_matches.concat(entry_text.match(pokemon_allcaps_regex))
+                if (entry_text.match(pokemon_allcaps_regex)) {
+                    // console.log("Pokemon written in all caps found");
+                    addDexError("\"Pokémon\" should always be written in lowercase, with only the \"P\" capitalized.");
+                }
+
+                error_matches = error_matches.concat(entry_text.match(pokename_plural_regex))
+                if (entry_text.match(pokename_plural_regex)) {
+                    // console.log("POKENAME written plural found");
+                    addDexError("\"POKENAME\" should not be pluralized with an \"S\". e.g. the plural of Pikachu is Pikachu.");
+                }
+
+                error_matches = error_matches.concat(entry_text.match(pokename_lower_case_regex))
+                if (entry_text.match(pokename_lower_case_regex)) {
+                    // console.log("POKENAME written in lowercase found");
+                    addDexError("\"POKENAME\" must be written in all caps, or it will not be properly replaced with the fusion's name.");
+                }
+
+                error_matches = error_matches.concat(entry_text.match(pokename_with_accent_regex))
+                if (entry_text.match(pokename_with_accent_regex)) {
+                    // console.log("POKENAME written with an accent for some reason found");
+                    addDexError("\"POKENAME\" should not have an accent, or it won't be properly replaced with the fusion's name.");
+                }
+
+                error_matches = error_matches.concat(entry_text.match(gendered_pronouns_regex))
+                if (entry_text.match(gendered_pronouns_regex)) {
+                    // console.log("gendered pronouns found");
+                    addDexError("Fusions should not be referred to using gendered pronouns (\"his\", \"her\"). Only use \"its\" or \"their\".");
+                }
+
+                
+                // console.log(error_matches);
+                return error_matches;
+
+            }
+
+            //takes in the whole string and also a list of errors, the canvas to draw on, and a starting offset
+            function drawHighlightBoxes(whole_string, error_matches, canvas_id, xpos, ypos) {
+                for (let i = 0; i < error_matches.length; i++) {
+                    if (error_matches[i] != null) {
+                        var c = document.getElementById(canvas_id);
+                        var ctx = c.getContext("2d");
+
+                        var draw_bounds = findBoundsOfWordInString(whole_string, error_matches[i]);
+                        //x, y, width, height
+                        ctx.fillStyle = "#f89aa0";
+                        ctx.strokeStyle = "red";
+                        
+                        ctx.fillRect(xpos + draw_bounds[0], ypos + 2, draw_bounds[1], 26);
+                        ctx.strokeRect(xpos + draw_bounds[0], ypos + 2, draw_bounds[1], 26);
+
+                        
+
+                    }
+                }
+            }
+
+            // gets the position of the start and end of a word, as well as which canvas it's gonna end up on
+            // so we can draw a highlight on it
+            function findBoundsOfWordInString(whole_string, find_word) {
+                var word_size = test_text_size(find_word); //the width depends on how long the word is, the height is constant
+
+                // console.log("   finding word " + find_word);
+                // console.log("   testing length of string: " + whole_string.slice(0, whole_string.indexOf(find_word)));
+                var start_pos = test_text_size(whole_string.slice(0, whole_string.indexOf(find_word)))
+
+                return [start_pos, word_size];
+            }
+
+            // draws text with a shadow at the precise (or close enough at least) size that the game does
             function drawTextEx(print_text, xpos, ypos, canvas_id) {
                 var c = document.getElementById(canvas_id);
                 var ctx = c.getContext("2d");
@@ -192,10 +364,19 @@
                 var img = document.getElementById("background_image");
                 ctx.drawImage(img,0,0);
 
+                //draw the sprite, if it exists
+                var deximg = document.getElementById("dex_image");
+                ctx.drawImage(deximg,-40,0);
+
                 // split the text into lines for page 1
                 var text_lines = splitPageIntoLines(pages[0])
 
                 const y_offset = 28;
+
+                drawHighlightBoxes(text_lines[0], doSpellCheck(text_lines[0]), "page_1_canvas", 40, 244 + 0*y_offset);
+                drawHighlightBoxes(text_lines[1], doSpellCheck(text_lines[1]), "page_1_canvas", 40, 244 + 1*y_offset);
+                drawHighlightBoxes(text_lines[2], doSpellCheck(text_lines[2]), "page_1_canvas", 40, 244 + 2*y_offset);
+                drawHighlightBoxes(text_lines[3], doSpellCheck(text_lines[3]), "page_1_canvas", 40, 244 + 3*y_offset);
 
                 drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_1_canvas")
                 drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_1_canvas")
@@ -205,9 +386,23 @@
                 var c2 = document.getElementById("page_2_canvas");
                 var ctx2 = c2.getContext("2d");
                 ctx2.drawImage(img,0,0);
+                ctx2.drawImage(deximg,-40,0);
 
                 // split the text into lines for page 2
                 text_lines = splitPageIntoLines(pages[1])
+
+                // hide the canvas if there's nothing on the page
+                if (pages[1] == "") {
+                    c2.style = "visibility: hidden";
+                }
+                else {
+                    c2.style = "visibility: visible";
+                }
+                
+                drawHighlightBoxes(text_lines[0], doSpellCheck(text_lines[0]), "page_2_canvas", 40, 244 + 0*y_offset);
+                drawHighlightBoxes(text_lines[1], doSpellCheck(text_lines[1]), "page_2_canvas", 40, 244 + 1*y_offset);
+                drawHighlightBoxes(text_lines[2], doSpellCheck(text_lines[2]), "page_2_canvas", 40, 244 + 2*y_offset);
+                drawHighlightBoxes(text_lines[3], doSpellCheck(text_lines[3]), "page_2_canvas", 40, 244 + 3*y_offset);
 
                 drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_2_canvas")
                 drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_2_canvas")
@@ -217,9 +412,23 @@
                 var c3 = document.getElementById("page_3_canvas");
                 var ctx3 = c3.getContext("2d");
                 ctx3.drawImage(img,0,0);
+                ctx3.drawImage(deximg,-40,0);
 
-                // split the text into lines for page 2
+                // split the text into lines for page 3
                 text_lines = splitPageIntoLines(pages[2])
+
+                // hide the canvas if there's nothing on the page
+                if (pages[2] == "") {
+                    c3.style = "visibility: hidden";
+                }
+                else {
+                    c3.style = "visibility: visible";
+                }
+
+                drawHighlightBoxes(text_lines[0], doSpellCheck(text_lines[0]), "page_3_canvas", 40, 244 + 0*y_offset);
+                drawHighlightBoxes(text_lines[1], doSpellCheck(text_lines[1]), "page_3_canvas", 40, 244 + 1*y_offset);
+                drawHighlightBoxes(text_lines[2], doSpellCheck(text_lines[2]), "page_3_canvas", 40, 244 + 2*y_offset);
+                drawHighlightBoxes(text_lines[3], doSpellCheck(text_lines[3]), "page_3_canvas", 40, 244 + 3*y_offset);
 
                 drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_3_canvas")
                 drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_3_canvas")
@@ -238,24 +447,24 @@
                 line_num = 0
                 for (let i = 0; i < words.length; i++) {
                     if(test_text_size(current_line + words[i]) > (max_line_size_px)) {
-                        console.log("new line!")
+                        // console.log("new line!")
                         text_lines[line_num] = current_line;
                         line_num++;
                         current_line = words[i] + " ";
                     }
                     else {
                         current_line += words[i] + " ";
-                        console.log(current_line)
-                        console.log(test_text_size(current_line))
+                        // console.log(current_line)
+                        // console.log(test_text_size(current_line))
                     }
                 }
                 text_lines[line_num] = current_line;
                 
-                console.log("the split string")
-                console.log(text_lines[0])
-                console.log(text_lines[1])
-                console.log(text_lines[2])
-                console.log(text_lines[3])
+                // console.log("the split string")
+                // console.log(text_lines[0])
+                // console.log(text_lines[1])
+                // console.log(text_lines[2])
+                // console.log(text_lines[3])
                 return text_lines;
             }
 
