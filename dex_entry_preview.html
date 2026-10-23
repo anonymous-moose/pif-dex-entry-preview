@@ -1,0 +1,280 @@
+
+<!DOCTYPE html>
+<html>
+    <head>
+        <script src="name_splits.js"></script>
+        <style>
+            @font-face {
+                font-family: FusionPokePixel;
+                /* src: url('Fonts/fusion-poke-pixel-normal-zh_hans.ttf'); */
+                /* src: url('Fonts/fusion-poke-pixel-small-zh_hans.ttf'); */
+                /* src: url('Fonts/fusion-pixel-10px-monospaced-zh_hans.ttf'); */
+                src: url('Fonts/power green.ttf');
+                
+            }
+
+            #Test {
+                position: absolute;
+                visibility: hidden;
+                height: auto;
+                width: auto;
+                white-space: nowrap; /* Thanks to Herb Caudill comment */
+                font-family: FusionPokePixel;
+                font-size: 26px;
+            }
+
+            #background_image {
+                visibility: hidden;
+            }
+        </style>
+    </head>
+    <body>
+        <form oninput="updatePreview()" onsubmit="event.preventDefault()">
+            <!-- <input type="text" id="textInput" name="textInput"> -->
+            Dex Entry: <textarea id="textInput" name="textInput" rows="4" cols="50"></textarea>
+            <br><br>
+        </form>
+
+        <form onsubmit="event.preventDefault(); updateFusionName();">
+            <!-- Dex Num: <input type="number" id="headNum" name="headNum"><input type="number" id="bodyNum" name="BodyNum"> -->
+            Dex Num: <input type="text" id="dexNum" name="dexNum">
+            <button onclick="updateFusionName()">Get Name</button>
+            <br><br>
+        </form>
+        
+        <form oninput="updatePreview()" onsubmit="event.preventDefault()">
+            Fusion Name: <input type="text" id="fusionName" name="fusionName">
+            <br><br>
+        </form>
+        
+        
+
+        <p id="charcount">Character count: </p>
+
+        <canvas id="page_1_canvas" width="512" height="384" style="border:1px solid #000000;"></canvas>
+        <canvas id="page_2_canvas" width="512" height="384" style="border:1px solid #000000;"></canvas>
+        <canvas id="page_3_canvas" width="512" height="384" style="border:1px solid #000000;"></canvas>
+
+        <img id="background_image" src="Images/bg_info.png">
+
+        <div id="Test">
+            abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
+        </div>
+
+        <br><br>
+        <br><br>
+        <br><br>
+        <br><br>
+        <br><br>
+        <br><br>
+        <br><br>
+        <br><br>
+
+        <p id="baseball" style="background-color: black; color: white;">⚾️</p> <button onclick="baseball_minigame()">click to hit baseball</button>
+        <script>
+            var baseballstate = 0;
+
+            function baseball_minigame() {
+                if (baseballstate == 0) {
+                    document.getElementById("baseball").innerHTML = "Thwack! you hit the baseball!"
+                    baseballstate = 1;
+                }
+                else {
+                    document.getElementById("baseball").innerHTML = "Whoosh! you missed the baseball! (because you already hit it out of the park and that was the only ball we had)"
+                }
+                
+            }
+        </script>
+
+        <script>
+            var pages = ["", "", ""];
+            var default_dex_string = "No custom Pokédex entry available for this Pokémon. Please consider submitting an entry for this Pokémon on the game's Discord. Auto-generated Pokédex entries can be enabled in the options menu."
+            
+            // recalculate the text splits and character counts, then redraw the canvases
+            function updatePreview() {
+                var user_text = document.getElementById("textInput").value;
+                var original_text = user_text
+
+                var fusion_name = document.getElementById("fusionName").value;
+                if (fusion_name != "") {
+                    user_text = user_text.replaceAll("POKENAME", fusion_name)
+                }
+                console.log(user_text);
+                
+                var max_chars_per_page = 150
+                splitTextIntoPages(user_text, max_chars_per_page)
+
+
+                update_canvas() // (it's actually three canvases but shhhh)
+
+                document.getElementById("charcount").innerHTML = "Char count: " + original_text.length + ", Char count with POKENAME replaced: " + user_text.length
+            }
+
+            function updateFusionName() {
+                const reDot = /[.]/;
+                var dexNum = document.getElementById("dexNum").value.toString();
+
+                var headNum = dexNum.slice(0, dexNum.search(reDot));
+                var bodyNum = dexNum.slice(dexNum.search(reDot)+1, dexNum.length);
+                console.log(headNum);
+                console.log(bodyNum);
+                // var headNum = document.getElementById("headNum").value;
+                // var bodyNum = document.getElementById("bodyNum").value;
+
+                if (headNum == "" || bodyNum == "") {
+                    return;
+                }
+
+                // map the dexnum from national dex order to pif dex order
+                if (headNum > 251) {
+                    headNum = NAT_DEX_MAPPING[headNum - 252][1];
+                }
+                if (bodyNum > 251) {
+                    bodyNum = NAT_DEX_MAPPING[bodyNum - 252][1];
+                }
+
+                console.log(SPLIT_NAMES[headNum][0] + SPLIT_NAMES[bodyNum][1]);
+                var headSplit = SPLIT_NAMES[headNum][0];
+                var bodySplit = SPLIT_NAMES[bodyNum][1];
+                if (bodySplit.charAt(0) == headSplit.charAt(headSplit.length-1)) {
+                
+                    headSplit = headSplit.slice(0, headSplit.length-1);
+                }
+
+                fusion_name = headSplit + bodySplit;
+                document.getElementById("fusionName").value = fusion_name;
+                updatePreview()
+
+                
+            }
+
+            // should be a pretty darn close match to ingame, now.
+            function splitTextIntoPages(text, max_chars_per_page) {
+                var words = text.split(" ");
+                var current_page = "";
+                pages[0] = "";
+                pages[1] = "";
+                pages[2] = "";
+                
+                var pagenum = 0;
+                for (let i = 0; i < words.length; i++) {
+                    if (current_page.length + words[i].length > max_chars_per_page) {
+                        pages[pagenum] = current_page;
+                        pagenum++;
+                        current_page = words[i] + " ";
+                    }
+                    else {
+                        current_page += words[i] + " ";
+                    }
+                }
+                pages[pagenum] = current_page;
+
+            }
+
+            function drawTextEx(print_text, xpos, ypos, canvas_id) {
+                var c = document.getElementById(canvas_id);
+                var ctx = c.getContext("2d");
+                ctx.font = "26px FusionPokePixel";
+                ctx.fillStyle = "#a6b8b7"
+                ctx.fillText(print_text, xpos, ypos + 28);
+                ctx.fillStyle = "#585a51"
+                ctx.fillText(print_text, xpos - 2, ypos - 2 + 28);
+            }
+
+            // really crappy code copy to do all three canvases
+            function update_canvas() {
+                var c = document.getElementById("page_1_canvas");
+                var ctx = c.getContext("2d");
+                // draw the background image
+                var img = document.getElementById("background_image");
+                ctx.drawImage(img,0,0);
+
+                // split the text into lines for page 1
+                var text_lines = splitPageIntoLines(pages[0])
+
+                const y_offset = 28;
+
+                drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_1_canvas")
+                drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_1_canvas")
+                drawTextEx(text_lines[2], 40, 244 + 2*y_offset, "page_1_canvas")
+                drawTextEx(text_lines[3], 40, 244 + 3*y_offset, "page_1_canvas")
+                
+                var c2 = document.getElementById("page_2_canvas");
+                var ctx2 = c2.getContext("2d");
+                ctx2.drawImage(img,0,0);
+
+                // split the text into lines for page 2
+                text_lines = splitPageIntoLines(pages[1])
+
+                drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_2_canvas")
+                drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_2_canvas")
+                drawTextEx(text_lines[2], 40, 244 + 2*y_offset, "page_2_canvas")
+                drawTextEx(text_lines[3], 40, 244 + 3*y_offset, "page_2_canvas")
+
+                var c3 = document.getElementById("page_3_canvas");
+                var ctx3 = c3.getContext("2d");
+                ctx3.drawImage(img,0,0);
+
+                // split the text into lines for page 2
+                text_lines = splitPageIntoLines(pages[2])
+
+                drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_3_canvas")
+                drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_3_canvas")
+                drawTextEx(text_lines[2], 40, 244 + 2*y_offset, "page_3_canvas")
+                drawTextEx(text_lines[3], 40, 244 + 3*y_offset, "page_3_canvas")
+            }
+            
+            function splitPageIntoLines(page_string) {
+                // const re = /\n|[^ \r\t\f\n\-]*\-+|(\S*([ \r\t\f]?))/;
+                // words = page_string.split(re);
+                const max_line_size_px = 512-80;
+
+                words = page_string.split(" ")
+                text_lines = ["", "", "", ""];
+                current_line = "";
+                line_num = 0
+                for (let i = 0; i < words.length; i++) {
+                    if(test_text_size(current_line + words[i]) > (max_line_size_px)) {
+                        console.log("new line!")
+                        text_lines[line_num] = current_line;
+                        line_num++;
+                        current_line = words[i] + " ";
+                    }
+                    else {
+                        current_line += words[i] + " ";
+                        console.log(current_line)
+                        console.log(test_text_size(current_line))
+                    }
+                }
+                text_lines[line_num] = current_line;
+                
+                console.log("the split string")
+                console.log(text_lines[0])
+                console.log(text_lines[1])
+                console.log(text_lines[2])
+                console.log(text_lines[3])
+                return text_lines;
+            }
+
+            //  the width we're testing against is 512 - 80?
+
+            // Source - https://stackoverflow.com/a/118251
+            // Posted by CMPalmer, modified by community. See post 'Timeline' for change history
+            // Retrieved 2026-10-22, License - CC BY-SA 4.0
+            function test_text_size(test_string) {
+                // var fontSize = 12;
+                var test = document.getElementById("Test");
+                test.innerHTML = test_string;
+                // test.style.fontSize = 26;
+                var height = (test.clientHeight + 1);
+                var width = (test.clientWidth + 1);
+
+                // console.log(height, width);
+                return width;
+            }
+
+            test_text_size(default_dex_string)
+            updatePreview()
+        </script>
+    </body>
+</html>
