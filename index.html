@@ -393,7 +393,7 @@
                 // do the dictionary spellcheck last, in case there's more dexwriting-specific feedback
                 var is_spelled_correctly = dictionary.check(check_word);
                 if (!is_spelled_correctly) {
-                    if (check_word == fusion_name) {
+                    if (check_word == fusion_name || check_word == (fusion_name + "'s")) {
                         // console.log(fusion_name + " is not a typo in this case because it's supposed to be there.");
                         return SPELL_CHECK_RESULT.PASS;
                     }
