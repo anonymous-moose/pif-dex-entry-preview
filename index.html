@@ -7,6 +7,7 @@
         <!-- none of this is AI. it's all me (a human) (and also a bit of code cribbed from humans on stackoverflow) -->
 
         <script src="name_splits.js"></script>
+        <script src="typo-master/typo/typo.js"></script>
         <style>
             @font-face {
                 font-family: FusionPokePixel;
@@ -40,8 +41,8 @@
     </head>
     <body>
         <form oninput="updatePreview()" onsubmit="event.preventDefault()">
-            <!-- <input type="text" id="textInput" name="textInput"> -->
-            Dex Entry: <textarea id="textInput" name="textInput" rows="4" cols="50"></textarea>
+            <!-- don't use the OS spellcheck, we're doing our own -->
+            Dex Entry: <textarea id="textInput" name="textInput" rows="4" cols="50" spellcheck="false"></textarea>
             <br><br>
         </form>
 
@@ -102,16 +103,28 @@
         </footer>
 
         <script>
+            var dictionary = new Typo("en_US", false, false, { dictionaryPath: "typo-master/typo/dictionaries" });
+
+            // var is_spelled_correctly = dictionary.check("mispelled");
+            
+
             var pages = ["", "", ""];
             var default_dex_string = "No custom Pokédex entry available for this Pokémon. Please consider submitting an entry for this Pokémon on the game's Discord. Auto-generated Pokédex entries can be enabled in the options menu."
             
+            // declared globally so the spellchecker can know that this isn't a typo
+            var fusion_name = "";
+
+            // no need to keep adding errors to the list for generic spelling mistakes
+            var spelling_mistakes_count = 0;
+
             // recalculate the text splits and character counts, then redraw the canvases
             function updatePreview() {
                 var user_text = document.getElementById("textInput").value;
                 var original_text = user_text
-                var fusion_name = document.getElementById("fusionName").value;
+                fusion_name = document.getElementById("fusionName").value;
 
                 clearDexErrors(); //clear all the errors from the unordered list before adding them back in
+                spelling_mistakes_count = 0;
 
                 if (fusion_name != "") {
                     user_text = user_text.replaceAll("POKENAME", fusion_name)
@@ -128,14 +141,22 @@
                 
 
                 if (user_text.length < 100) {
-                    addDexError("Entry is too short (<100 characters), and would be rejected");
+                    addDexError("Entry is too short (<100 characters), and would be rejected.");
                 }
 
                 if (user_text.length > 250) {
-                    addDexError("Entry is too long (>250 characters), and would be rejected");
+                    addDexError("Entry is too long (>250 characters), and would be rejected.");
                 }
 
-                update_canvas() // (it's actually three canvases but shhhh)
+                if (user_text.endsWith(". ")) {
+                    addDexError("Entry has an extra space after the final period.");
+                }
+
+                if (user_text.charAt(0) != user_text.charAt(0).toUpperCase()) {
+                    addDexError("Entry does not begin with a capital letter.");
+                }
+
+                update_canvas(fusion_name) // (it's actually three canvases but shhhh)
 
                 document.getElementById("charcount").innerHTML = "Char count: " + original_text.length + ", Char count with POKENAME replaced: " + user_text.length
             }
@@ -212,12 +233,24 @@
             }
 
             function addDexError(error_text) {
+                var error_list = document.getElementById("errorsList").childNodes;
+
+                for (let i = 0; i < error_list.length; i++) {
+                    if (error_list[i].firstChild.data == ("Problem: " + error_text)) {
+                        //the error being thrown already exists, so just increment the number
+                        error_list[i].lastChild.data = " (" + (parseInt(error_list[i].lastChild.data.slice(2,-1)) + 1).toString() + ")";
+                        return;
+                    }
+                }
+
                 const node = document.createElement("li");
 
                 // Create a text node:
                 const textnode = document.createTextNode("Problem: " + error_text);
+                const textnodenum = document.createTextNode(" (1)");
 
                 node.appendChild(textnode);
+                node.appendChild(textnodenum);
                 document.getElementById("errorsList").appendChild(node);
             }
 
@@ -243,9 +276,53 @@
                 document.getElementById("dex_image_holder").appendChild(imagenode);
             }
 
-            // does a spell check 
-            // (should be used on individual lines, that way it's easier to find out where on the canvas to highlight)
-            function doSpellCheck(entry_text) {
+
+            
+            //possible results from a single word spellcheck
+            // pass means it's all good
+            // FAIL_ENGLISH means it failed the typo.js english language spellcheck
+            // FAIL_POKEDEX means it failed a specific pokedex writing restriction
+            const SPELL_CHECK_RESULT = {
+                PASS: "PASS",
+                FAIL_ENGLISH: "FAIL_ENGLISH",
+                FAIL_POKEDEX: "FAIL_POKEDEX",
+            }
+
+            function doLineSpellCheck(check_line, canvas_id, xpos, ypos) {
+                var all_words = check_line.split(" ");
+
+                if (check_line.match(/\n/)) {
+                    addDexError("Entry contains a newline character (you can't have that)");
+                }                
+
+                var partial_line = "";
+                for (let i = 0; i < all_words.length; i++) {
+                    var start_pos = measure_text_size(partial_line);
+                    var word_size = measure_text_size(all_words[i]);
+
+                    // for each word, if it trips a spellcheck problem, draw a box around it
+                    if (all_words[i] != "") {
+                        var spellcheck_result = doWordSpellCheck(all_words[i]);
+                        if (spellcheck_result == SPELL_CHECK_RESULT.FAIL_POKEDEX) {
+                            // dex writing mistakes highlight in orange, takes priority over normal spelling mistakes
+                            drawHighlightBox(xpos + start_pos, ypos, word_size, canvas_id, "orange", "#f7d199");
+                        }
+                        else if (spellcheck_result == SPELL_CHECK_RESULT.FAIL_ENGLISH) {
+                            // spelling mistakes highlight in red
+                            drawHighlightBox(xpos + start_pos, ypos, word_size, canvas_id, "red", "#f89aa0");
+                        }
+                    }
+                    
+                    partial_line = partial_line + all_words[i] + " ";
+                }
+            }
+
+            // checks if an individual word is spelled properly
+            // upgraded version of doSpellCheck
+
+            function doWordSpellCheck(check_word) {
+                // check against Typo.js to get english words
+                
                 // checks for "Pokémon" being incorrect
                 const pokemon_no_accent_regex = /pokemon/gmi;
                 const pokemon_not_capitalized_regex = /pokémon/gm;
@@ -261,91 +338,95 @@
 
                 // regex to check for weird characters like apostrophes, the fancy quotation marks, and newlines
                 const weird_chars_regex = /\n|“|”|’/g;
+                
+                // strip punctuation off the end of the word so it doesn't get flagged as a spelling mistake
+                if (check_word.endsWith(",") || check_word.endsWith(".") || check_word.endsWith(";") || check_word.endsWith(":") || check_word.endsWith("!") || check_word.endsWith("?")) {
+                    check_word = check_word.slice(0, -1);
+                }
 
-                var error_matches = []
+                if (check_word.match(gendered_pronouns_regex)) {
+                    addDexError("Fusions should not be referred to using gendered pronouns (\"his\", \"her\"). Only use \"its\" or \"their\".");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
 
-
-                error_matches = error_matches.concat(entry_text.match(pokemon_no_accent_regex))
-                if (entry_text.match(pokemon_no_accent_regex)) {
+                if (check_word.match(pokemon_no_accent_regex)) {
                     // console.log("Pokemon with no accent found");
                     addDexError("\"Pokémon\" should always be written with an accent (é).");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(pokemon_not_capitalized_regex))
-                if (entry_text.match(pokemon_not_capitalized_regex)) {
-                    // console.log("Pokemon not capitalized found");
-                    addDexError("\"Pokémon\" should always be written with a capital \"P\".");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(pokemon_allcaps_regex))
-                if (entry_text.match(pokemon_allcaps_regex)) {
-                    // console.log("Pokemon written in all caps found");
-                    addDexError("\"Pokémon\" should always be written in lowercase, with only the \"P\" capitalized.");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(pokename_plural_regex))
-                if (entry_text.match(pokename_plural_regex)) {
-                    // console.log("POKENAME written plural found");
-                    addDexError("\"POKENAME\" should not be pluralized with an \"S\". e.g. the plural of Pikachu is Pikachu.");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(pokename_lower_case_regex))
-                if (entry_text.match(pokename_lower_case_regex)) {
-                    // console.log("POKENAME written in lowercase found");
-                    addDexError("\"POKENAME\" must be written in all caps, or it will not be properly replaced with the fusion's name.");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(pokename_with_accent_regex))
-                if (entry_text.match(pokename_with_accent_regex)) {
-                    // console.log("POKENAME written with an accent for some reason found");
-                    addDexError("\"POKENAME\" should not have an accent, or it won't be properly replaced with the fusion's name.");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(gendered_pronouns_regex))
-                if (entry_text.match(gendered_pronouns_regex)) {
-                    // console.log("gendered pronouns found");
-                    addDexError("Fusions should not be referred to using gendered pronouns (\"his\", \"her\"). Only use \"its\" or \"their\".");
-                }
-
-                error_matches = error_matches.concat(entry_text.match(weird_chars_regex))
-                if (entry_text.match(weird_chars_regex)) {
-                    addDexError("Entry contains characters that don't display properly ingame.");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
                 }
                 
-                // console.log(error_matches);
-                return error_matches;
+                if (check_word.match(pokemon_not_capitalized_regex)) {
+                    // console.log("Pokemon not capitalized found");
+                    addDexError("\"Pokémon\" should always be written with a capital \"P\".");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
+                
+                if (check_word.match(pokemon_allcaps_regex)) {
+                    // console.log("Pokemon written in all caps found");
+                    addDexError("\"Pokémon\" should always be written in lowercase, with only the \"P\" capitalized.");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
+                
+                if (check_word.match(pokename_plural_regex)) {
+                    // console.log("POKENAME written plural found");
+                    addDexError("\"POKENAME\" should not be pluralized with an \"S\". e.g. the plural of Pikachu is Pikachu.");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
+                
+                if (check_word.match(pokename_lower_case_regex)) {
+                    // console.log("POKENAME written in lowercase found");
+                    addDexError("\"POKENAME\" must be written in all caps, or it will not be properly replaced with the fusion's name.");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
 
+                if (check_word.match(pokename_with_accent_regex)) {
+                    // console.log("POKENAME written with an accent for some reason found");
+                    addDexError("\"POKENAME\" should not have an accent, or it won't be properly replaced with the fusion's name.");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
+
+                if (check_word.match(weird_chars_regex)) {
+                    addDexError("Entry contains characters that don't display properly ingame.");
+                    return SPELL_CHECK_RESULT.FAIL_POKEDEX;
+                }
+
+                // do the dictionary spellcheck last, in case there's more dexwriting-specific feedback
+                var is_spelled_correctly = dictionary.check(check_word);
+                if (!is_spelled_correctly) {
+                    if (check_word == fusion_name) {
+                        // console.log(fusion_name + " is not a typo in this case because it's supposed to be there.");
+                        return SPELL_CHECK_RESULT.PASS;
+                    }
+
+                    addDexError("Spelling mistake.");
+                    return SPELL_CHECK_RESULT.FAIL_ENGLISH;
+                }
+
+                //if you haven't failed my gauntlet of tests, then you passed the spellcheck! yay!
+                return SPELL_CHECK_RESULT.PASS;
             }
 
-            //takes in the whole string and also a list of errors, the canvas to draw on, and a starting offset
-            function drawHighlightBoxes(whole_string, error_matches, canvas_id, xpos, ypos) {
-                for (let i = 0; i < error_matches.length; i++) {
-                    if (error_matches[i] != null) {
-                        var c = document.getElementById(canvas_id);
-                        var ctx = c.getContext("2d");
 
-                        var draw_bounds = findBoundsOfWordInString(whole_string, error_matches[i]);
-                        //x, y, width, height
-                        ctx.fillStyle = "#f89aa0";
-                        ctx.strokeStyle = "red";
-                        
-                        ctx.fillRect(xpos + draw_bounds[0], ypos + 2, draw_bounds[1], 26);
-                        ctx.strokeRect(xpos + draw_bounds[0], ypos + 2, draw_bounds[1], 26);
+            // draw a single highlight box in a configurable colour
+            function drawHighlightBox(xpos, ypos, width, canvas_id, stroke_color, fill_color) {
+                var c = document.getElementById(canvas_id);
+                var ctx = c.getContext("2d");
 
-                        
-
-                    }
-                }
+                ctx.fillStyle = fill_color;
+                ctx.strokeStyle = stroke_color;
+                
+                ctx.fillRect(xpos, ypos + 2, width, 26);
+                ctx.strokeRect(xpos, ypos + 2, width, 26);
             }
 
             // gets the position of the start and end of a word, as well as which canvas it's gonna end up on
             // so we can draw a highlight on it
             function findBoundsOfWordInString(whole_string, find_word) {
-                var word_size = test_text_size(find_word); //the width depends on how long the word is, the height is constant
+                var word_size = measure_text_size(find_word); //the width depends on how long the word is, the height is constant
 
                 // console.log("   finding word " + find_word);
                 // console.log("   testing length of string: " + whole_string.slice(0, whole_string.indexOf(find_word)));
-                var start_pos = test_text_size(whole_string.slice(0, whole_string.indexOf(find_word)))
+                var start_pos = measure_text_size(whole_string.slice(0, whole_string.indexOf(find_word)))
 
                 return [start_pos, word_size];
             }
@@ -361,7 +442,7 @@
                 ctx.fillText(print_text, xpos - 2, ypos - 2 + 28);
             }
 
-            // really crappy code copy to do all three canvases
+            // somewhat crappy code copy to do all three canvases
             function update_canvas() {
                 var c = document.getElementById("page_1_canvas");
                 var ctx = c.getContext("2d");
@@ -378,15 +459,11 @@
 
                 const y_offset = 28;
 
-                drawHighlightBoxes(text_lines[0], doSpellCheck(text_lines[0]), "page_1_canvas", 40, 244 + 0*y_offset);
-                drawHighlightBoxes(text_lines[1], doSpellCheck(text_lines[1]), "page_1_canvas", 40, 244 + 1*y_offset);
-                drawHighlightBoxes(text_lines[2], doSpellCheck(text_lines[2]), "page_1_canvas", 40, 244 + 2*y_offset);
-                drawHighlightBoxes(text_lines[3], doSpellCheck(text_lines[3]), "page_1_canvas", 40, 244 + 3*y_offset);
-
-                drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_1_canvas")
-                drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_1_canvas")
-                drawTextEx(text_lines[2], 40, 244 + 2*y_offset, "page_1_canvas")
-                drawTextEx(text_lines[3], 40, 244 + 3*y_offset, "page_1_canvas")
+                // new line spell check
+                for (let i = 0; i < 4; i++) {
+                    doLineSpellCheck(text_lines[i], "page_1_canvas", 40, 244 + i*y_offset);
+                    drawTextEx(text_lines[i], 40, 244 + i*y_offset, "page_1_canvas")
+                }
                 
                 var c2 = document.getElementById("page_2_canvas");
                 var ctx2 = c2.getContext("2d");
@@ -403,16 +480,11 @@
                 else {
                     c2.style = "visibility: visible";
                 }
-                
-                drawHighlightBoxes(text_lines[0], doSpellCheck(text_lines[0]), "page_2_canvas", 40, 244 + 0*y_offset);
-                drawHighlightBoxes(text_lines[1], doSpellCheck(text_lines[1]), "page_2_canvas", 40, 244 + 1*y_offset);
-                drawHighlightBoxes(text_lines[2], doSpellCheck(text_lines[2]), "page_2_canvas", 40, 244 + 2*y_offset);
-                drawHighlightBoxes(text_lines[3], doSpellCheck(text_lines[3]), "page_2_canvas", 40, 244 + 3*y_offset);
 
-                drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_2_canvas")
-                drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_2_canvas")
-                drawTextEx(text_lines[2], 40, 244 + 2*y_offset, "page_2_canvas")
-                drawTextEx(text_lines[3], 40, 244 + 3*y_offset, "page_2_canvas")
+                for (let i = 0; i < 4; i++) {
+                    doLineSpellCheck(text_lines[i], "page_2_canvas", 40, 244 + i*y_offset);
+                    drawTextEx(text_lines[i], 40, 244 + i*y_offset, "page_2_canvas")
+                }
 
                 var c3 = document.getElementById("page_3_canvas");
                 var ctx3 = c3.getContext("2d");
@@ -430,15 +502,13 @@
                     c3.style = "visibility: visible";
                 }
 
-                drawHighlightBoxes(text_lines[0], doSpellCheck(text_lines[0]), "page_3_canvas", 40, 244 + 0*y_offset);
-                drawHighlightBoxes(text_lines[1], doSpellCheck(text_lines[1]), "page_3_canvas", 40, 244 + 1*y_offset);
-                drawHighlightBoxes(text_lines[2], doSpellCheck(text_lines[2]), "page_3_canvas", 40, 244 + 2*y_offset);
-                drawHighlightBoxes(text_lines[3], doSpellCheck(text_lines[3]), "page_3_canvas", 40, 244 + 3*y_offset);
+                for (let i = 0; i < 4; i++) {
+                    doLineSpellCheck(text_lines[i], "page_3_canvas", 40, 244 + i*y_offset);
+                    drawTextEx(text_lines[i], 40, 244 + i*y_offset, "page_3_canvas")
+                }
 
-                drawTextEx(text_lines[0], 40, 244 + 0*y_offset, "page_3_canvas")
-                drawTextEx(text_lines[1], 40, 244 + 1*y_offset, "page_3_canvas")
-                drawTextEx(text_lines[2], 40, 244 + 2*y_offset, "page_3_canvas")
-                drawTextEx(text_lines[3], 40, 244 + 3*y_offset, "page_3_canvas")
+                
+            
             }
             
             function splitPageIntoLines(page_string) {
@@ -451,7 +521,7 @@
                 current_line = "";
                 line_num = 0
                 for (let i = 0; i < words.length; i++) {
-                    if(test_text_size(current_line + words[i]) > (max_line_size_px)) {
+                    if(measure_text_size(current_line + words[i]) > (max_line_size_px)) {
                         // console.log("new line!")
                         text_lines[line_num] = current_line;
                         line_num++;
@@ -460,7 +530,7 @@
                     else {
                         current_line += words[i] + " ";
                         // console.log(current_line)
-                        // console.log(test_text_size(current_line))
+                        // console.log(measure_text_size(current_line))
                     }
                 }
                 text_lines[line_num] = current_line;
@@ -478,7 +548,7 @@
             // Source - https://stackoverflow.com/a/118251
             // Posted by CMPalmer, modified by community. See post 'Timeline' for change history
             // Retrieved 2026-10-22, License - CC BY-SA 4.0
-            function test_text_size(test_string) {
+            function measure_text_size(test_string) {
                 // var fontSize = 12;
                 var test = document.getElementById("Test");
                 test.innerHTML = test_string;
@@ -490,7 +560,7 @@
                 return width;
             }
 
-            test_text_size(default_dex_string)
+            measure_text_size(default_dex_string)
             updatePreview()
         </script>
     </body>

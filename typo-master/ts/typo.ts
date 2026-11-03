@@ -1,0 +1,1379 @@
+/* globals chrome: false */
+/* globals __dirname: false */
+/* globals require: false */
+/* globals Buffer: false */
+/* globals module: false */
+
+/**
+ * Typo is a JavaScript implementation of a spellchecker using hunspell-style
+ * dictionaries.
+ */
+
+interface Window {
+	chrome: any;
+	browser: any;
+}
+
+var Typo;
+
+(function () {
+"use strict";
+
+interface HunspellFlags {
+	PFX?: boolean;
+	SFX?: boolean;
+	REP?: boolean;
+	FLAG?: boolean;
+	COMPOUNDMIN?: boolean;
+	COMPOUNDRULE?: boolean;
+	ONLYINCOMPOUND?: boolean;
+	KEEPCASE?: boolean;
+	NOSUGGEST?: boolean;
+	PRIORITYSUGGEST?: boolean;
+	NEEDAFFIX?: boolean;
+	ICONV?: boolean;
+	OCONV?: boolean;
+}
+
+interface TypoSettings {
+	dictionaryPath?: string;
+	flags?: HunspellFlags;
+	asyncLoad?: boolean;
+	loadedCallback?: Function;
+}
+
+interface HashMap {
+	[key: string]: any;
+}
+
+interface AffixEntry {
+	add: string;
+	continuationClasses?: string[];
+	match?: RegExp;
+	remove?: RegExp|string;
+}
+
+interface AffixRule {
+	type: string;
+	combineable: boolean;
+	entries: AffixEntry[];
+}
+
+interface ConversionEntry {
+	pattern: string;
+	replacement: string;
+	atStart: boolean;
+	atEnd: boolean;
+}
+
+interface ConversionTable {
+	regex: RegExp;
+	replacements: string[];
+}
+
+function runGenSync<T>(gen: Generator<void, T, void>): T {
+	let next;
+	while (!(next = gen.next()).done) {}
+	return next.value;
+}
+
+function runGenAsync<T>(gen: Generator<void, T, void>): Promise<T> {
+	if ((typeof window !== "undefined") && window.requestIdleCallback) {
+		// run the generator in idle callbacks
+		//
+		// The generator should yield periodically to allow prompt return to the event loop
+		// when the deadline is crossed.
+		return new Promise((resolve, reject) => {
+			function idleCallback(deadline: IdleDeadline) {
+				try {
+					let next;
+					while (!(next = gen.next()).done) {
+						if (!deadline.timeRemaining()) {
+							window.requestIdleCallback(idleCallback)
+							return;
+						}
+					}
+					resolve(next.value);
+				} catch (err) {
+					reject(err);
+				}
+			}
+			window.requestIdleCallback(idleCallback);
+		});
+	} else {
+		// fallback: run the generator in a single callback
+		return (async function() { return runGenSync(gen); })();
+	}
+}
+
+
+/**
+ * Typo constructor.
+ *
+ * @param {string} [dictionary] The locale code of the dictionary being used. e.g.,
+ *                              "en_US". This is only used to auto-load dictionaries.
+ * @param {string} [affData]    The data from the dictionary's .aff file. If omitted
+ *                              and Typo.js is being used in a Chrome extension, the .aff
+ *                              file will be loaded automatically from
+ *                              lib/typo/dictionaries/[dictionary]/[dictionary].aff
+ *                              In other environments, it will be loaded from
+ *                              [settings.dictionaryPath]/dictionaries/[dictionary]/[dictionary].aff
+ * @param {string} [wordsData]  The data from the dictionary's .dic file. If omitted
+ *                              and Typo.js is being used in a Chrome extension, the .dic
+ *                              file will be loaded automatically from
+ *                              lib/typo/dictionaries/[dictionary]/[dictionary].dic
+ *                              In other environments, it will be loaded from
+ *                              [settings.dictionaryPath]/dictionaries/[dictionary]/[dictionary].dic
+ * @param {Object} [settings]   Constructor settings. Available properties are:
+ *                              {string} [dictionaryPath]: path to load dictionary from in non-chrome
+ *                              environment.
+ *                              {Object} [flags]: flag information.
+ *                              {boolean} [asyncLoad]: If true, affData and wordsData will be loaded
+ *                              and parsed asynchronously. The parsing is scheduled in idle
+ *                              callbacks if available. You may consider loading a polyfill for
+ *                              window.requestIdleCallback to avoid freezes in browsers not
+ *                              supporting idle callbacks (eg: Safari).
+ *                              {Function} [loadedCallback]: Called when both affData and wordsData
+ *                              have been loaded. Only used if asyncLoad is set to true. The parameter
+ *                              is the instantiated Typo object.
+ *
+ * @returns {Typo} A Typo object.
+ */
+
+Typo = function (dictionary?: string, affData?: string|boolean, wordsData?: string|boolean, settings?: TypoSettings) {
+	settings = settings || {} as TypoSettings;
+
+	this.dictionary = null;
+
+	this.rules = {};
+	this.dictionaryTable = new Map();
+
+	this.compoundRules = [];
+	this.compoundRuleCodes = {};
+
+	this.replacementTable = [];
+
+	this.inputConversionTable = null;
+	this.outputConversionTable = null;
+
+	this.flags = settings.flags || {};
+
+	this.memoized = {};
+
+	this.loaded = false;
+
+	const self = this;
+
+	let path;
+
+	// Loop-control variables.
+	let i, j, _len, _jlen;
+
+	if (dictionary) {
+		self.dictionary = dictionary;
+		// If the data is preloaded, just setup the Typo object.
+		if (affData && wordsData) {
+			setup();
+		}
+		else {
+			if ( typeof window !== 'undefined' ) {
+				// Webpage or browser extension
+				if (settings.dictionaryPath) {
+					path = settings.dictionaryPath;
+				} else {
+					path = "typo/dictionaries";
+				}
+
+				// Browser extensions assume that the file is being loaded from the root of the extension.
+				if ( window.chrome && window.chrome.runtime && window.chrome.runtime.getURL ) {
+					path = window.chrome.runtime.getURL( path );
+				} else if ( window.browser && window.browser.runtime && window.browser.runtime.getURL ) {
+					path = window.browser.runtime.getURL( path );
+				}
+			} else if (typeof __dirname !== 'undefined') {
+				// Node
+				path = __dirname + '/dictionaries';
+			} else {
+				// Node
+				path = './dictionaries';
+			}
+
+			const affPath = path + "/" + dictionary + "/" + dictionary + ".aff";
+			const dicPath = path + "/" + dictionary + "/" + dictionary + ".dic";
+
+			if (!affData) {
+				// The .aff file's SET line declares the charset of both files, so it has to
+				// be read before the .dic file. It's read as UTF-8 first, which is what most
+				// dictionaries use. If it declares another charset, both files are read
+				// again in that charset.
+				readDataFile(affPath, function (data: string): void {
+					const charset = self._getCharset(data);
+
+					if (charset === "utf8") {
+						setAffData(data);
+					}
+					else {
+						readDataFile(affPath, setAffData, charset);
+					}
+
+					if (!wordsData) {
+						readDataFile(dicPath, setWordsData, charset);
+					}
+				}, "utf8");
+			}
+			else if (!wordsData) {
+				readDataFile(dicPath, setWordsData, self._getCharset(affData as string));
+			}
+		}
+	}
+
+	function readDataFile(url: string, setFunc: Function, charset: string): void {
+		const response = self._readFile(url, charset, settings?.asyncLoad);
+
+		if (settings?.asyncLoad) {
+			response.then(function(data: string): void {
+				setFunc(data);
+			});
+		}
+		else {
+			setFunc(response);
+		}
+	}
+
+	function setAffData(data: string): void {
+		affData = data;
+
+		if (wordsData) {
+			setup();
+		}
+	}
+
+	function setWordsData(data: string): void {
+		wordsData = data;
+
+		if (affData) {
+			setup();
+		}
+	}
+
+	function setup(): void {
+		if (settings?.asyncLoad) {
+			runGenAsync(setupGen()).catch(
+				(err) => console.log(`Dictionary parse error: ${err}`));
+		} else {
+			runGenSync(setupGen());
+		}
+	}
+
+	function* setupGen(): Generator<void, void, void> {
+		self.rules = self._parseAFF(affData);
+
+		// Save the rule codes that are used in compound rules.
+		self.compoundRuleCodes = {};
+
+		for (i = 0, _len = self.compoundRules.length; i < _len; i++) {
+			const rule = self.compoundRules[i];
+
+			for (j = 0, _jlen = rule.length; j < _jlen; j++) {
+				self.compoundRuleCodes[rule[j]] = [];
+			}
+		}
+
+		// If we add this ONLYINCOMPOUND flag to self.compoundRuleCodes, then _parseDIC
+		// will do the work of saving the list of words that are compound-only.
+		if ("ONLYINCOMPOUND" in self.flags) {
+			self.compoundRuleCodes[self.flags.ONLYINCOMPOUND] = [];
+		}
+
+		self.dictionaryTable = yield* self._parseDICGen(wordsData);
+
+		// Get rid of any codes from the compound rule codes that are never used
+		// (or that were special regex characters).  Not especially necessary...
+		for (i in self.compoundRuleCodes) {
+			if (self.compoundRuleCodes[i].length === 0) {
+				delete self.compoundRuleCodes[i];
+			}
+		}
+
+		// Build the full regular expressions for each compound rule.
+		// I have a feeling (but no confirmation yet) that this method of
+		// testing for compound words is probably slow.
+		for (i = 0, _len = self.compoundRules.length; i < _len; i++) {
+			const ruleText = self.compoundRules[i];
+
+			let expressionText = "";
+
+			for (j = 0, _jlen = ruleText.length; j < _jlen; j++) {
+				const character = ruleText[j];
+
+				if (character in self.compoundRuleCodes) {
+					expressionText += "(" + self.compoundRuleCodes[character].join("|") + ")";
+				}
+				else {
+					expressionText += character;
+				}
+			}
+
+			self.compoundRules[i] = new RegExp( '^' + expressionText + '$', "i");
+		}
+
+		self.loaded = true;
+
+		if (settings?.asyncLoad && settings?.loadedCallback) {
+			settings.loadedCallback(self);
+		}
+	}
+
+	return this;
+};
+
+Typo.prototype = {
+	/**
+	 * Loads a Typo instance from a hash of all of the Typo properties.
+	 *
+	 * @param {object} obj A hash of Typo properties, probably gotten from a JSON.parse(JSON.stringify(typo_instance)).
+	 */
+
+	load : function (obj: Object) {
+		for (let i in obj) {
+			if (obj.hasOwnProperty(i)) {
+				this[i] = (obj as any)[i];
+			}
+		}
+
+		return this;
+	},
+
+	/**
+	 * Read the contents of a file.
+	 *
+	 * @param {string} path The path (relative) to the file.
+	 * @param {string} [charset="utf8"] The charset of the file, as named on the .aff file's
+	 *                                   SET line (e.g. "UTF-8" or "ISO8859-1").
+	 * @param {boolean} async If true, the file will be read asynchronously. For node.js this does nothing, all
+	 *        files are read synchronously.
+	 * @returns {string} The file data if async is false, otherwise a promise object. If running node.js, the data is
+	 *          always returned.
+	 */
+
+	_readFile : function (path: string, charset?: string, async?: boolean): string | Promise<void> {
+		charset = charset || "utf8";
+
+		if (typeof XMLHttpRequest !== 'undefined') {
+			const req = new XMLHttpRequest();
+			req.open("GET", path, !! async);
+			req.overrideMimeType?.("text/plain; charset=" + charset);
+
+			if ( !! async ) {
+				let promise: Promise<void> = new Promise(function(resolve: Function, reject: Function): void {
+					req.onload = function(): void {
+						if (req.status === 200) {
+							resolve(req.responseText);
+						}
+						else {
+							reject(req.statusText);
+						}
+					};
+
+					req.onerror = function(): void {
+						reject(req.statusText);
+					}
+				});
+
+				req.send(null);
+
+				return promise;
+			}
+			else {
+				req.send(null);
+
+				return req.responseText;
+			}
+		}
+		else if (typeof require !== 'undefined') {
+			// Node.js
+			const fs = require("fs");
+
+			try {
+				if (fs.existsSync(path)) {
+					if (/^utf-?8$/i.test(charset)) {
+						return fs.readFileSync(path, "utf8");
+					}
+
+					// Hunspell charset names such as "ISO8859-1" aren't valid Node.js
+					// encodings, but TextDecoder understands them.
+					const bytes = fs.readFileSync(path);
+
+					try {
+						return new TextDecoder(charset).decode(bytes);
+					} catch (e) {
+						console.log("Unsupported charset " + charset + "; reading " + path + " as UTF-8.");
+
+						return bytes.toString("utf8");
+					}
+				}
+				else {
+					console.log("Path " + path + " does not exist.");
+				}
+			} catch (e) {
+				console.log(e);
+			}
+
+			return '';
+		}
+
+		return '';
+	},
+
+	/**
+	 * Determines the charset of a dictionary from the SET line of its .aff file.
+	 *
+	 * @param {string} affData The data from the dictionary's .aff file.
+	 * @returns {string} "utf8", or the charset name as written in the .aff file.
+	 */
+
+	_getCharset : function (affData: string): string {
+		const match = affData.match(/^[ \t]*SET[ \t]+(\S+)/m);
+
+		if (!match || /^utf-?8$/i.test(match[1])) {
+			return "utf8";
+		}
+
+		return match[1];
+	},
+
+	/**
+	 * Parse the rules out from a .aff file.
+	 *
+	 * @param {string} data The contents of the affix file.
+	 * @returns object The rules from the file.
+	 */
+
+	_parseAFF : function (data: string): HashMap {
+		let rules: HashMap = {};
+
+		const inputConversionEntries: ConversionEntry[] = [];
+		const outputConversionEntries: ConversionEntry[] = [];
+
+		let line, subline, numEntries, lineParts;
+		let i, j, _len, _jlen;
+
+		const lines = data.split(/\r?\n/);
+
+		for (i = 0, _len = lines.length; i < _len; i++) {
+			// Remove comment lines
+			line = this._removeAffixComments(lines[i]);
+			line = line.trim();
+
+			if ( ! line ) {
+				continue;
+			}
+
+			const definitionParts = line.split(/\s+/);
+
+			const ruleType = definitionParts[0];
+
+			if (ruleType === "PFX" || ruleType === "SFX") {
+				const ruleCode = definitionParts[1];
+				const combineable = definitionParts[2];
+				numEntries = parseInt(definitionParts[3], 10);
+
+				let entries: AffixEntry[] = [];
+
+				for (j = i + 1, _jlen = i + 1 + numEntries; j < _jlen; j++) {
+					subline = lines[j];
+
+					lineParts = subline.split(/\s+/);
+					const charactersToRemove = lineParts[2];
+
+					const additionParts = lineParts[3].split("/");
+
+					let charactersToAdd = additionParts[0];
+					if (charactersToAdd === "0") charactersToAdd = "";
+
+					const continuationClasses = this.parseRuleCodes(additionParts[1]);
+
+					const regexToMatch = lineParts[4];
+
+					let entry: AffixEntry = {
+						add : charactersToAdd
+					};
+
+					if (continuationClasses.length > 0) entry.continuationClasses = continuationClasses;
+
+					if (regexToMatch !== ".") {
+						if (ruleType === "SFX") {
+							entry.match = new RegExp(regexToMatch + "$");
+						}
+						else {
+							entry.match = new RegExp("^" + regexToMatch);
+						}
+					}
+
+					if (charactersToRemove != "0") {
+						if (ruleType === "SFX") {
+							entry.remove = new RegExp(charactersToRemove  + "$");
+						}
+						else {
+							entry.remove = charactersToRemove;
+						}
+					}
+
+					entries.push(entry);
+				}
+
+				rules[ruleCode] = { "type" : ruleType, "combineable" : (combineable === "Y"), "entries" : entries } as AffixRule;
+
+				i += numEntries;
+			}
+			else if (ruleType === "COMPOUNDRULE") {
+				numEntries = parseInt(definitionParts[1], 10);
+
+				for (j = i + 1, _jlen = i + 1 + numEntries; j < _jlen; j++) {
+					line = lines[j];
+
+					lineParts = line.split(/\s+/);
+					this.compoundRules.push(lineParts[1]);
+				}
+
+				i += numEntries;
+			}
+			else if (ruleType === "REP") {
+				lineParts = line.split(/\s+/);
+
+				if (lineParts.length === 3) {
+					this.replacementTable.push([ lineParts[1], lineParts[2] ]);
+				}
+			}
+			else if (ruleType === "ICONV" || ruleType === "OCONV") {
+				// Input (ICONV) and output (OCONV) conversion tables, e.g. "ICONV Æ AE".
+				// The table's header line ("ICONV 2") has only two parts and is skipped.
+				lineParts = line.split(/\s+/);
+
+				if (lineParts.length === 3) {
+					const entries = (ruleType === "ICONV") ? inputConversionEntries : outputConversionEntries;
+
+					entries.push(this._parseConversionEntry(lineParts[1], lineParts[2]));
+				}
+			}
+			else {
+				// ONLYINCOMPOUND
+				// COMPOUNDMIN
+				// FLAG
+				// KEEPCASE
+				// NEEDAFFIX
+
+				this.flags[ruleType] = definitionParts[1];
+			}
+		}
+
+		this.inputConversionTable = this._compileConversionTable(inputConversionEntries);
+		this.outputConversionTable = this._compileConversionTable(outputConversionEntries);
+
+		return rules;
+	},
+
+	/**
+	 * Parses one ICONV/OCONV table entry.
+	 *
+	 * As in Hunspell, a leading underscore anchors the pattern to the start of the
+	 * word, a trailing underscore anchors it to the end of the word, and any other
+	 * underscore stands for a space.
+	 *
+	 * @param {string} pattern The text to look for.
+	 * @param {string} replacement The text to replace it with.
+	 * @returns {ConversionEntry}
+	 */
+
+	_parseConversionEntry : function (pattern: string, replacement: string): ConversionEntry {
+		let atStart = false;
+		let atEnd = false;
+
+		if (pattern.length > 1 && pattern[0] === "_") {
+			atStart = true;
+			pattern = pattern.substring(1);
+		}
+
+		if (pattern.length > 1 && pattern[pattern.length - 1] === "_") {
+			atEnd = true;
+			pattern = pattern.substring(0, pattern.length - 1);
+		}
+
+		return {
+			pattern : pattern.replace(/_/g, " "),
+			replacement : replacement.replace(/_/g, " "),
+			atStart : atStart,
+			atEnd : atEnd
+		};
+	},
+
+	/**
+	 * Compiles the entries of an ICONV/OCONV table into a single regular expression.
+	 *
+	 * Longer patterns are listed first so that, as in Hunspell, the longest match
+	 * at each position wins. Each entry gets its own capture group, which is how
+	 * the replacement callback identifies the entry that matched.
+	 *
+	 * @param {ConversionEntry[]} entries The parsed table entries.
+	 * @returns {ConversionTable|null} The compiled table, or null if the table is empty.
+	 */
+
+	_compileConversionTable : function (entries: ConversionEntry[]): ConversionTable | null {
+		if (entries.length === 0) {
+			return null;
+		}
+
+		// Array.prototype.sort is stable, so entries with equally long patterns keep
+		// their order from the .aff file.
+		const sorted = entries.slice().sort(function (a: ConversionEntry, b: ConversionEntry): number {
+			return b.pattern.length - a.pattern.length;
+		});
+
+		const alternatives: string[] = [];
+		const replacements: string[] = [];
+
+		for (let i = 0, _len = sorted.length; i < _len; i++) {
+			const entry = sorted[i];
+			const escapedPattern = entry.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+			alternatives.push((entry.atStart ? "^" : "") + "(" + escapedPattern + ")" + (entry.atEnd ? "$" : ""));
+			replacements.push(entry.replacement);
+		}
+
+		return {
+			regex : new RegExp(alternatives.join("|"), "g"),
+			replacements : replacements
+		};
+	},
+
+	/**
+	 * Applies a compiled ICONV/OCONV conversion table to a word.
+	 *
+	 * @param {string} word The word to convert.
+	 * @param {ConversionTable|null} table The compiled conversion table to apply.
+	 * @returns {string} The converted word.
+	 */
+
+	_applyConversionTable : function (word: string, table: ConversionTable | null): string {
+		if (!table) {
+			return word;
+		}
+
+		const replacements = table.replacements;
+
+		return word.replace(table.regex, function (): string {
+			// The entry that matched is the one whose capture group is defined.
+			for (let i = 1, _len = replacements.length; i <= _len; i++) {
+				if (arguments[i] !== undefined) {
+					return replacements[i - 1];
+				}
+			}
+
+			return arguments[0];
+		});
+	},
+
+	/**
+	 * Removes comments.
+	 *
+	 * @param {string} data A line from an affix file.
+	 * @return {string} The cleaned-up line.
+	 */
+
+	_removeAffixComments : function (line: string): string {
+		// This used to remove any string starting with '#' up to the end of the line,
+		// but some COMPOUNDRULE definitions include '#' as part of the rule.
+		// So, only remove lines that begin with a comment, optionally preceded by whitespace.
+		if ( line.match( /^\s*#/ ) ) {
+			return '';
+		}
+
+		return line;
+	},
+
+	/**
+	 * Parses the words out from the .dic file.
+	 *
+	 * @param {string} data The data from the dictionary file.
+	 * @returns {Map} The lookup table containing all of the words and
+	 *                 word forms from the dictionary.
+	 */
+
+	_parseDIC : function (data: string): Map<string, string[] | null> {
+		return runGenSync(this._parseDICGen(data));
+	},
+
+	_parseDICGen : function* (data: string): Generator<void, Map<string, string[] | null>, void> {
+		data = this._removeDicComments(data);
+
+		const lines = data.split(/\r?\n/);
+		let dictionaryTable = new Map();
+
+		function addWord(word: string, rules: string[]): void {
+			// Some dictionaries will list the same word multiple times with different rule sets.
+			if (!dictionaryTable.has(word)) {
+				dictionaryTable.set(word, null);
+			}
+
+			if (rules.length > 0) {
+				if (dictionaryTable.get(word) === null) {
+					dictionaryTable.set(word, []);
+				}
+
+				dictionaryTable.get(word).push(rules);
+			}
+		}
+
+		// The first line is the number of words in the dictionary.
+		for (let i = 1, _len = lines.length; i < _len; i++) {
+			if (!(i & 63)) {
+				yield;
+			}
+
+			const line = lines[i];
+
+			if (!line) {
+				// Ignore empty lines.
+				continue;
+			}
+
+			// The line format is one of:
+			//     word
+			//     word/flags
+			//     word/flags xx:abc yy:def
+			//     word xx:abc yy:def
+			// We don't use the morphological flags (xx:abc, yy:def) and we don't want them included
+			// in the extracted flags.
+			const just_word_and_flags = line.replace(/\s.*$/, '');
+
+			// just_word_and_flags is definitely one of:
+			//     word
+			//     word/flags
+			const parts = just_word_and_flags.split('/', 2);
+			const word = parts[0];
+
+			// Now for each affix rule, generate that form of the word.
+			if (parts.length > 1) {
+				const ruleCodesArray = this.parseRuleCodes(parts[1]);
+
+				// Save the ruleCodes for compound word situations.
+				if (!("NEEDAFFIX" in this.flags) || ruleCodesArray.indexOf(this.flags.NEEDAFFIX) === -1) {
+					addWord(word, ruleCodesArray);
+				}
+
+				for (let j = 0, _jlen = ruleCodesArray.length; j < _jlen; j++) {
+					const code = ruleCodesArray[j];
+
+					const rule = this.rules[code];
+
+					if (rule) {
+						const newWords = this._applyRule(word, rule);
+
+						for (let ii = 0, _iilen = newWords.length; ii < _iilen; ii++) {
+							const newWord = newWords[ii];
+
+							addWord(newWord, []);
+
+							if (rule.combineable) {
+								for (let k = j + 1; k < _jlen; k++) {
+									const combineCode = ruleCodesArray[k];
+
+									const combineRule = this.rules[combineCode];
+
+									if (combineRule) {
+										if (combineRule.combineable && (rule.type != combineRule.type)) {
+											const otherNewWords = this._applyRule(newWord, combineRule);
+
+											for (let iii = 0, _iiilen = otherNewWords.length; iii < _iiilen; iii++) {
+												const otherNewWord = otherNewWords[iii];
+												addWord(otherNewWord, []);
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
+					if (code in this.compoundRuleCodes) {
+						this.compoundRuleCodes[code].push(word);
+					}
+				}
+			}
+			else {
+				addWord(word.trim(), []);
+			}
+		}
+
+		return dictionaryTable;
+	},
+
+
+	/**
+	 * Removes comment lines and then cleans up blank lines and trailing whitespace.
+	 *
+	 * @param {string} data The data from a .dic file.
+	 * @return {string} The cleaned-up data.
+	 */
+
+	_removeDicComments : function (data: string): string {
+		// I can't find any official documentation on it, but at least the de_DE
+		// dictionary uses tab-indented lines as comments.
+
+		// Remove comments
+		data = data.replace(/^\t.*$/mg, "");
+
+		return data;
+	},
+
+	parseRuleCodes : function (textCodes: string): string[] {
+		if (!textCodes) {
+			return [];
+		}
+		else if (!("FLAG" in this.flags)) {
+			// The flag symbols are single characters
+			return textCodes.split("");
+		}
+		else if (this.flags.FLAG === "long") {
+			// The flag symbols are two characters long.
+			let flags = [];
+
+			for (let i = 0, _len = textCodes.length; i < _len; i += 2) {
+				flags.push(textCodes.substr(i, 2));
+			}
+
+			return flags;
+		}
+		else if (this.flags.FLAG === "num") {
+			// The flag symbols are a CSV list of numbers.
+			return textCodes.split(",");
+		}
+		else if (this.flags.FLAG === "UTF-8") {
+			// The flags are single UTF-8 characters.
+			// @see https://github.com/cfinke/Typo.js/issues/57
+			return Array.from(textCodes);
+		}
+		else {
+			// It's possible that this fallback case will not work for all FLAG values,
+			// but I think it's more likely to work than not returning anything at all.
+			return textCodes.split("");
+		}
+	},
+
+	/**
+	 * Applies an affix rule to a word.
+	 *
+	 * @param {string} word The base word.
+	 * @param {Object} rule The affix rule.
+	 * @returns {string[]} The new words generated by the rule.
+	 */
+
+	_applyRule : function (word: string, rule: AffixRule): string[] {
+		const entries = rule.entries;
+		let newWords: string[] = [];
+
+		for (let i = 0, _len = entries.length; i < _len; i++) {
+			const entry = entries[i];
+
+			if (!entry.match || word.match(entry.match)) {
+				let newWord = word;
+
+				if (entry.remove) {
+					newWord = newWord.replace(entry.remove, "");
+				}
+
+				if (rule.type === "SFX") {
+					newWord = newWord + entry.add;
+				}
+				else {
+					newWord = entry.add + newWord;
+				}
+
+				newWords.push(newWord);
+
+				if ("continuationClasses" in entry) {
+					for (let j = 0, _jlen = entry.continuationClasses!.length; j < _jlen; j++) {
+						const continuationRule = this.rules[entry.continuationClasses![j]];
+
+						if (continuationRule) {
+							newWords = newWords.concat(this._applyRule(newWord, continuationRule));
+						}
+						/*
+						else {
+							// This shouldn't happen, but it does, at least in the de_DE dictionary.
+							// I think the author mistakenly supplied lower-case rule codes instead
+							// of upper-case.
+						}
+						*/
+					}
+				}
+			}
+		}
+
+		return newWords;
+	},
+
+	/**
+	 * Checks whether a word or a capitalization variant exists in the current dictionary.
+	 * The word is trimmed and several variations of capitalizations are checked.
+	 * If you want to check a word without any changes made to it, call checkExact()
+	 *
+	 * @see http://blog.stevenlevithan.com/archives/faster-trim-javascript re:trimming function
+	 *
+	 * @param {string} aWord The word to check.
+	 * @returns {boolean}
+	 */
+
+	check : function (aWord: string): boolean {
+		if (!this.loaded) {
+			throw "Dictionary not loaded.";
+		}
+
+		if (!aWord) {
+			return false;
+		}
+
+		// Remove leading and trailing whitespace, then apply the dictionary's input
+		// conversion table (ICONV).
+		const trimmedWord = this._applyConversionTable(aWord.replace(/^\s\s*/, '').replace(/\s\s*$/, ''), this.inputConversionTable);
+
+		return this._checkCaseVariants(trimmedWord);
+	},
+
+	/**
+	 * Checks whether a word or a capitalization variant exists in the current dictionary.
+	 *
+	 * Unlike check(), the word is used as-is: it is neither trimmed nor passed through
+	 * the input conversion table. suggest() uses this for its candidate words, which are
+	 * built from an already-converted word, so that the conversion isn't repeated for
+	 * every candidate.
+	 *
+	 * @param {string} word The word to check.
+	 * @returns {boolean}
+	 */
+
+	_checkCaseVariants : function (word: string): boolean {
+		if (!word) {
+			return false;
+		}
+
+		if (this.checkExact(word)) {
+			return true;
+		}
+
+		// The exact word is not in the dictionary.
+		if (word.toUpperCase() === word) {
+			// The word was supplied in all uppercase.
+			// Check for a capitalized form of the word.
+			const capitalizedWord = word[0] + word.substring(1).toLowerCase();
+
+			if (this.hasFlag(capitalizedWord, "KEEPCASE")) {
+				// Capitalization variants are not allowed for this word.
+				return false;
+			}
+
+			if (this.checkExact(capitalizedWord)) {
+				// The all-caps word is a capitalized word spelled correctly.
+				return true;
+			}
+
+			if (this.checkExact(word.toLowerCase())) {
+				// The all-caps is a lowercase word spelled correctly.
+				return true;
+			}
+		}
+
+		const uncapitalizedWord = word[0].toLowerCase() + word.substring(1);
+
+		if (uncapitalizedWord !== word) {
+			if (this.hasFlag(uncapitalizedWord, "KEEPCASE")) {
+				// Capitalization variants are not allowed for this word.
+				return false;
+			}
+
+			// Check for an uncapitalized form
+			if (this.checkExact(uncapitalizedWord)) {
+				// The word is spelled correctly but with the first letter capitalized.
+				return true;
+			}
+		}
+
+		return false;
+	},
+
+	/**
+	 * Checks whether a word exists in the current dictionary.
+	 *
+	 * @param {string} word The word to check.
+	 * @returns {boolean}
+	 */
+
+	checkExact : function (word: string): boolean {
+		if (!this.loaded) {
+			throw "Dictionary not loaded.";
+		}
+
+		const ruleCodes = this.dictionaryTable.get(word);
+
+		let i, _len;
+
+		if (typeof ruleCodes === 'undefined') {
+			// Check if this might be a compound word.
+			if ("COMPOUNDMIN" in this.flags && word.length >= this.flags.COMPOUNDMIN) {
+				for (i = 0, _len = this.compoundRules.length; i < _len; i++) {
+					if (word.match(this.compoundRules[i])) {
+						return true;
+					}
+				}
+			}
+		}
+		else if (ruleCodes === null) {
+			// a null (but not undefined) value for an entry in the dictionary table
+			// means that the word is in the dictionary but has no flags.
+			return true;
+		}
+		else if (typeof ruleCodes === 'object') { // this.dictionary['hasOwnProperty'] will be a function.
+			for (i = 0, _len = ruleCodes.length; i < _len; i++) {
+				if (!this.hasFlag(word, "ONLYINCOMPOUND", ruleCodes[i])) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	},
+
+	/**
+	 * Looks up whether a given word is flagged with a given flag.
+	 *
+	 * @param {string} word The word in question.
+	 * @param {string} flag The flag in question.
+	 * @return {boolean}
+	 */
+
+	hasFlag : function (word: string, flag: string, wordFlags?: string[]): boolean {
+		if (!this.loaded) {
+			throw "Dictionary not loaded.";
+		}
+
+		if (flag in this.flags) {
+			if (typeof wordFlags === 'undefined') {
+				wordFlags = Array.prototype.concat.apply([], this.dictionaryTable.get(word));
+			}
+
+			if (wordFlags && wordFlags.indexOf(this.flags[flag]) !== -1) {
+				return true;
+			}
+		}
+
+		return false;
+	},
+
+	/**
+	 * Returns a list of suggestions for a misspelled word.
+	 *
+	 * @see http://www.norvig.com/spell-correct.html for the basis of this suggestor.
+	 * This suggestor is primitive, but it works.
+	 *
+	 * @param {string} word The misspelling.
+	 * @param {number} [limit=5] The maximum number of suggestions to return.
+	 * @returns {string[]} The array of suggestions.
+	 */
+
+	alphabet : "",
+
+	suggest : function (word: string, limit: number): string[] {
+		if (!this.loaded) {
+			throw "Dictionary not loaded.";
+		}
+
+		limit = limit || 5;
+
+		if (this.memoized.hasOwnProperty(word)) {
+			const memoizedLimit = this.memoized[word]['limit'];
+
+			// Only return the cached list if it's big enough or if there weren't enough suggestions
+			// to fill a smaller limit.
+			if (limit <= memoizedLimit || this.memoized[word]['suggestions'].length < memoizedLimit) {
+				return this.memoized[word]['suggestions'].slice(0, limit);
+			}
+		}
+
+		if (this.check(word)) return [];
+
+		const self = this;
+
+		// Suggestions are built from the input-converted word (ICONV) and are
+		// passed through the output conversion table (OCONV) before being returned.
+		const convertedWord = this._applyConversionTable(word, this.inputConversionTable);
+
+		function outputConvert(suggestions: string[]): string[] {
+			const converted: string[] = [];
+
+			for (let i = 0, _len = suggestions.length; i < _len; i++) {
+				const suggestion = self._applyConversionTable(suggestions[i], self.outputConversionTable);
+
+				// Output conversion can map distinct suggestions onto the same string.
+				if (converted.indexOf(suggestion) === -1) {
+					converted.push(suggestion);
+				}
+			}
+
+			return converted;
+		}
+
+		// Check the replacement table.
+		for (let i = 0, _len = this.replacementTable.length; i < _len; i++) {
+			const replacementEntry = this.replacementTable[i];
+
+			if (convertedWord.indexOf(replacementEntry[0]) !== -1) {
+				const correctedWord = convertedWord.replace(replacementEntry[0], replacementEntry[1]);
+
+				if (this._checkCaseVariants(correctedWord)) {
+					return outputConvert([ correctedWord ]);
+				}
+			}
+		}
+
+		if (!this.alphabet) {
+			// Use the English alphabet as the default. Problematic, but backwards-compatible.
+			this.alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+			// Any characters defined in the affix file as substitutions can go in the alphabet too.
+			// Note that dictionaries do not include the entire alphabet in the TRY flag when it's there.
+			// For example, Q is not in the default English TRY list; that's why having the default
+			// alphabet above is useful.
+			if ( 'TRY' in this.flags ) {
+				this.alphabet += this.flags['TRY'];
+			}
+
+			// Plus any additional characters specifically defined as being allowed in words.
+			if ( 'WORDCHARS' in this.flags ) {
+				this.alphabet += this.flags['WORDCHARS'];
+			}
+
+			// Remove any duplicates.
+			let alphaArray: string[] = this.alphabet.split("");
+			alphaArray.sort();
+
+			let alphaHash: HashMap = {};
+			for ( let i = 0; i < alphaArray.length; i++ ) {
+				alphaHash[ alphaArray[i] ] = true;
+			}
+
+			this.alphabet = '';
+
+			for ( let i in alphaHash ) {
+				this.alphabet += i;
+			}
+		}
+
+		/**
+		 * Returns a hash keyed by all of the strings that can be made by making a single edit to the word (or words in) `words`
+		 * The value of each entry is the number of unique ways that the resulting word can be made.
+		 *
+		 * @arg HashMap words A hash keyed by words (all with the value `true` to make lookups very quick).
+		 * @arg boolean known_only Whether this function should ignore strings that are not in the dictionary.
+		 */
+		function edits1(words: HashMap, known_only?: boolean): HashMap {
+			let rv: HashMap = {};
+
+			let i, j, _iilen, _len, _jlen, _edit;
+
+			const alphabetLength = self.alphabet.length;
+
+			for (let word in words) {
+				for (i = 0, _len = word.length + 1; i < _len; i++) {
+					const s = [ word.substring(0, i), word.substring(i) ];
+
+					// Remove a letter.
+					if (s[1]) {
+						_edit = s[0] + s[1].substring(1);
+
+						if (!known_only || self._checkCaseVariants(_edit)) {
+							if (!(_edit in rv)) {
+								rv[_edit] = 1;
+							}
+							else {
+								rv[_edit] += 1;
+							}
+						}
+					}
+
+					// Transpose letters
+					// Eliminate transpositions of identical letters
+					if (s[1].length > 1 && s[1][1] !== s[1][0]) {
+						_edit = s[0] + s[1][1] + s[1][0] + s[1].substring(2);
+
+						if (!known_only || self._checkCaseVariants(_edit)) {
+							if (!(_edit in rv)) {
+								rv[_edit] = 1;
+							}
+							else {
+								rv[_edit] += 1;
+							}
+						}
+					}
+
+					if (s[1]) {
+						// Replace a letter with another letter.
+
+						const lettercase = (s[1].substring(0,1).toUpperCase() === s[1].substring(0,1)) ? 'uppercase' : 'lowercase';
+
+						for (j = 0; j < alphabetLength; j++) {
+							let replacementLetter = self.alphabet[j];
+
+							// Set the case of the replacement letter to the same as the letter being replaced.
+							if ( 'uppercase' === lettercase ) {
+								replacementLetter = replacementLetter.toUpperCase();
+							}
+
+							// Eliminate replacement of a letter by itself
+							if (replacementLetter != s[1].substring(0,1)){
+								_edit = s[0] + replacementLetter + s[1].substring(1);
+
+								if (!known_only || self._checkCaseVariants(_edit)) {
+									if (!(_edit in rv)) {
+										rv[_edit] = 1;
+									}
+									else {
+										rv[_edit] += 1;
+									}
+								}
+							}
+						}
+					}
+
+					if (s[1]) {
+						// Add a letter between each letter.
+						for (j = 0; j < alphabetLength; j++) {
+							// If the letters on each side are capitalized, capitalize the replacement.
+							const lettercase = (s[0].substring(-1).toUpperCase() === s[0].substring(-1) && s[1].substring(0,1).toUpperCase() === s[1].substring(0,1)) ? 'uppercase' : 'lowercase';
+
+							let replacementLetter = self.alphabet[j];
+
+							if ( 'uppercase' === lettercase ) {
+								replacementLetter = replacementLetter.toUpperCase();
+							}
+
+							_edit = s[0] + replacementLetter + s[1];
+
+							if (!known_only || self._checkCaseVariants(_edit)) {
+								if (!(_edit in rv)) {
+									rv[_edit] = 1;
+								}
+								else {
+									rv[_edit] += 1;
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return rv;
+		}
+
+		function correct(word: string): string[] {
+			// Get the edit-distance-1 and edit-distance-2 forms of this word.
+			const ed1 = edits1({ [word] : true });
+			const ed2 = edits1(ed1, true);
+
+			// Sort the edits based on how many different ways they were created.
+			let weighted_corrections = ed2;
+
+			for (let ed1word in ed1) {
+				if (!self._checkCaseVariants(ed1word)) {
+					continue;
+				}
+
+				if (ed1word in weighted_corrections) {
+					weighted_corrections[ed1word] += ed1[ed1word];
+				}
+				else {
+					weighted_corrections[ed1word] = ed1[ed1word];
+				}
+			}
+
+			let i, _len;
+
+			let sorted_corrections = [];
+
+			for (i in weighted_corrections) {
+				if (weighted_corrections.hasOwnProperty(i)) {
+					if (self.hasFlag(i, "PRIORITYSUGGEST")) {
+						// We've defined a new affix rule called PRIORITYSUGGEST, indicating that
+						// if this word is in the suggestions list for a misspelled word, it should
+						// be given priority over other suggestions.
+						//
+						// Add a large number to its weight to push it to the top of the list.
+						// If multiple priority suggestions are in the list, they'll still be ranked
+						// against each other, but they'll all be above non-priority suggestions.
+						weighted_corrections[i] += 1000;
+					}
+
+					sorted_corrections.push([ i, weighted_corrections[i] ]);
+				}
+			}
+
+			function sorter(a: string[], b: string[]): -1 | 0 | 1 {
+				const a_val = a[1];
+				const b_val = b[1];
+				if (a_val < b_val) {
+					return -1;
+				} else if (a_val > b_val) {
+					return 1;
+				}
+				// @todo If a and b are equally weighted, add our own weight based on something like the key locations on this language's default keyboard.
+				return b[0].localeCompare(a[0]) as -1 | 0 | 1;
+			}
+
+			sorted_corrections.sort(sorter).reverse();
+
+			let rv = [];
+
+			let capitalization_scheme = "lowercase";
+
+			if (word.toUpperCase() === word) {
+				capitalization_scheme = "uppercase";
+			}
+			else if (word.substr(0, 1).toUpperCase() + word.substr(1).toLowerCase() === word) {
+				capitalization_scheme = "capitalized";
+			}
+
+			let working_limit = limit;
+
+			for (i = 0; i < Math.min(working_limit, sorted_corrections.length); i++) {
+				if ("uppercase" === capitalization_scheme) {
+					sorted_corrections[i][0] = sorted_corrections[i][0].toUpperCase();
+				}
+				else if ("capitalized" === capitalization_scheme) {
+					sorted_corrections[i][0] = sorted_corrections[i][0].substr(0, 1).toUpperCase() + sorted_corrections[i][0].substr(1);
+				}
+
+				if (!self.hasFlag(sorted_corrections[i][0], "NOSUGGEST") && rv.indexOf(sorted_corrections[i][0]) === -1) {
+					rv.push(sorted_corrections[i][0]);
+				}
+				else {
+					// If one of the corrections is not eligible as a suggestion , make sure we still return the right number of suggestions.
+					working_limit++;
+				}
+			}
+
+			return rv;
+		}
+
+		this.memoized[word] = {
+			'suggestions': outputConvert(correct(convertedWord)),
+			'limit': limit
+		};
+
+		return this.memoized[word]['suggestions'];
+	}
+};
+})();
+
+// Support for use as a node.js module.
+if (typeof module !== 'undefined') {
+	module.exports = Typo;
+}
