@@ -540,6 +540,10 @@
                 // console.log(text_lines[1])
                 // console.log(text_lines[2])
                 // console.log(text_lines[3])
+                // console.log(line_num);
+                if (text_lines.length > 4) {
+                    addDexError("Text has been pushed onto the fifth line and won't be drawn. Try adjusting the wording.");
+                }
                 return text_lines;
             }
 
